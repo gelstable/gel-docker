@@ -2,70 +2,41 @@ containers=()
 instances=()
 
 latest_server_ver() {
-  local dist
-  local subdist
-  local idx_url_base
-  local index
-  local jq_query
-  local ver_key
-
-  dist="bookworm"
-  subdist="${1:-nightly}"
-  if [ -n "${subdist}" ]; then
-    dist+=".${subdist}"
-  fi
-
-  idx_url_base="https://packages.geldata.com/apt/.jsonindexes"
-  index=$(curl --proto '=https' --tlsv1.2 -fsSL "${idx_url_base}/${dist}.json")
-
-  jq_query="
-     .packages[]
-     | select(.basename == \"gel-server\")
-     | select(.slot | contains(\"-rc\") | not)
-     | select(.architecture == \"$(arch)\")
-     | .version_key"
-
-  ver_key=$(echo "$index" \
-            | jq -r "$jq_query" \
-            | sort --version-sort --reverse \
-            | head -n 1)
-
-  if [ -n "${ver_key}" ]; then
-    jq_query="
-      .packages[]
-      | select(.version_key == \"${ver_key}\")
-      | select(.architecture == \"$(arch)\")
-      | select(.basename == \"gel-server\")"
-
-    echo "$index" | jq -r "$jq_query"
-  fi
+  local subdist="${1:-${GEL_TEST_CHANNEL:-stable}}"
+  local architecture
+  architecture=$(uname -m)
+  case "$architecture" in
+    x86_64|amd64) architecture=amd64 ;;
+    aarch64|arm64) architecture=arm64 ;;
+    *) echo "Unsupported architecture: $architecture" >&2; return 1 ;;
+  esac
+  case "$subdist" in
+    stable|testing) ;;
+    *) echo "Unsupported channel: $subdist" >&2; return 1 ;;
+  esac
+  curl -fsSL "${GEL_REGISTRY_URL:-https://registry.gelstable.com}/apt/dists/${subdist}/main/binary-${architecture}/Packages" \
+    | python3 "${BASH_SOURCE[0]%/*}/select-package.py" --arch "$architecture" \
+        --slot "${GEL_TEST_SLOT:-}" --exact-version "${GEL_TEST_EXACT_VERSION:-}"
 }
 
-
 build_container() {
-  local idx_entry
-  local slot
-  local subdist
-  local -a buildargs
-
-  subdist="${1:-nightly}"
-  idx_entry=$(latest_server_ver "${subdist}")
-
-  slot=$(echo "$idx_entry" | jq -r '.slot')
-
-  buildargs+=(
-    --build-arg
-    "version=${slot}"
-  )
-
-  if [ -n "${subdist}" ]; then
-    buildargs+=(
-      --build-arg
-      "subdist=${subdist}"
-    )
+  if [[ "${GEL_TEST_IMAGE_READY:-}" = 1 ]]; then
+    return
   fi
-
-  docker build -t geldata/gel:latest "${buildargs[@]}" .
+  local subdist="${1:-${GEL_TEST_CHANNEL:-stable}}"
+  local idx_entry
+  local -a buildargs
+  idx_entry=$(latest_server_ver "$subdist") || return
+  buildargs+=(--build-arg "version=$(jq -r .slot <<< "$idx_entry")"
+              --build-arg "exact_version=$(jq -r .version <<< "$idx_entry")"
+              --build-arg "subdist=$subdist")
+  if [[ -n "${GEL_REGISTRY_URL:-}" ]]; then
+    buildargs+=(--build-arg "registry_url=$GEL_REGISTRY_URL")
+  fi
+  if [[ -n "${GEL_KEY_FINGERPRINT:-}" ]]; then
+    buildargs+=(--build-arg "key_fingerprint=$GEL_KEY_FINGERPRINT")
+  fi
+  docker build -t ghcr.io/gelstable/gel:latest "${buildargs[@]}" .
 }
 
 
@@ -84,14 +55,14 @@ create_instance() {
   local -a connect_args
   local -a link_args
 
-  image="$(echo $3 | jq -r '.image // ""')"
-  image="${image:-geldata/gel:latest}"
-  user="$(echo $3 | jq -r '.user // ""')"
+  image="$(echo "$3" | jq -r '.image // ""')"
+  image="${image:-ghcr.io/gelstable/gel:latest}"
+  user="$(echo "$3" | jq -r '.user // ""')"
   user="${user:-admin}"
-  password="$(echo $3 | jq -r '.password // ""')"
-  database="$(echo $3 | jq -r '.database // ""')"
-  tls_ca_file="$(echo $3 | jq -r '.tls_ca_file // ""')"
-  extensions="$(echo $3 | jq -r '.extensions // ""')"
+  password="$(echo "$3" | jq -r '.password // ""')"
+  database="$(echo "$3" | jq -r '.database // ""')"
+  tls_ca_file="$(echo "$3" | jq -r '.tls_ca_file // ""')"
+  extensions="$(echo "$3" | jq -r '.extensions // ""')"
 
   if [ $# -gt 2 ]; then
     shift 3
@@ -100,9 +71,9 @@ create_instance() {
   fi
 
   _container="edb_dock_$(uuidgen | sed s/-//g)"
-  containers+=($_container)
+  containers+=("$_container")
   _instance="testinst_$(uuidgen | sed s/-//g)"
-  instances+=($_instance)
+  instances+=("$_instance")
 
   docker_args+=(
     --publish=5656
@@ -197,7 +168,7 @@ common_teardown() {
     echo "--- CONTAINER: $cont ---"
     docker logs "$cont"
   done
-  if [[ ${#containers[@]} > 0 ]]; then
+  if [[ ${#containers[@]} -gt 0 ]]; then
     docker rm -f "${containers[@]}" || :
   fi
   for instance in "${instances[@]}"; do

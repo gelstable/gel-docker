@@ -1,2 +1,2 @@
-FROM geldata/gel:latest
+FROM ghcr.io/gelstable/gel:latest
 COPY /dbschema /dbschema
