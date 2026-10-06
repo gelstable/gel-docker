@@ -50,9 +50,9 @@ runtime `GEL_DOCKER_EXTENSIONS` installations.
 `registry_url` defaults to `https://registry.gelstable.com`. `key_fingerprint`
 pins the primary OpenPGP fingerprint of `/keys/gelstable.asc`; the downloaded
 armored key must match before APT reads the repository. The current default is
-the disposable bootstrap key; production rollout must replace it with the
-published production fingerprint. For a local signed repository, explicitly
-set both arguments to its URL and public key fingerprint.
+the production signing key fingerprint
+`EBFC46CC958983DD73D6E7D7F7C050A836EDB7EC`. For a local signed repository,
+explicitly set both arguments to its URL and public key fingerprint.
 
 ## Tests and publication
 

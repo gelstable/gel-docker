@@ -3,7 +3,7 @@ ARG version
 ARG exact_version
 ARG subdist=stable
 ARG registry_url=https://registry.gelstable.com
-ARG key_fingerprint=F8572499192C6FA4FCF9F41D60925A049A5C41FF
+ARG key_fingerprint=EBFC46CC958983DD73D6E7D7F7C050A836EDB7EC
 
 ENV GOSU_VERSION=1.11
 ENV DEFAULT_OS_USER=gel
