@@ -1,35 +1,18 @@
-name: Run Tests
+name: Run tests
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: '0 0 * * *'
   workflow_dispatch:
-    inputs: {}
   push:
-    branches:
-      - master
-      - ci
+    branches: [master, ci]
   pull_request:
-    branches:
-      - "*"
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      max-parallel: 4
-      matrix:
-        os: [ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install packages
-        run: sudo apt-get install -y bats jq parallel
-      - name: Install Gel CLI
-        uses: geldata/setup-gel@v1
-      - name: Run tests
-        run: bats tests/*.bats
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0
-        with:
-          ignore_paths: tests hooks
+    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository] -- test the workflow from this checkout
+    with:
+      channel: testing

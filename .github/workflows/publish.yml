@@ -1,0 +1,142 @@
+name: Publish GHCR image
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: Server slot to force rebuild (optional)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-publish
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      changed: ${{ steps.plan.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y python3-debian
+      - name: Sign in to read image labels
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Plan stable image updates
+        id: plan
+        env:
+          FORCE_SLOT: ${{ inputs.slot }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            curl -fsSL "https://registry.gelstable.com/apt/dists/stable/main/binary-$arch/Packages" -o "$arch.Packages"
+          done
+          matrix=$(python3 tests/select-package.py --all --amd64 amd64.Packages --arm64 arm64.Packages --slot "$FORCE_SLOT")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "changed=$(jq '.include | length > 0' <<< "$matrix")" >> "$GITHUB_OUTPUT"
+          jq '.include[] | {tags, labels: {"com.gelstable.server-version": .version, "com.gelstable.cli-version": .cli_version}}' <<< "$matrix"
+  dry-run:
+    needs: plan
+    if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Print planned tags and labels without publishing
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          jq '.include[] | {tags, labels: {"com.gelstable.server-version": .version, "com.gelstable.cli-version": .cli_version}}' <<< "$MATRIX"
+  test:
+    needs: plan
+    if: needs.plan.outputs.changed == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository] -- test workflow from this checkout
+    with:
+      channel: stable
+      slot: ${{ matrix.slot }}
+      exact_version: ${{ matrix.version }}
+      cli_version: ${{ matrix.cli_version }}
+      artifact_prefix: image-${{ matrix.slot }}
+      save_images: true
+  publish:
+    needs: [plan, test]
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-${{ matrix.slot }}-*
+          path: images
+      - name: Verify selected versions
+        env:
+          SLOT: ${{ matrix.slot }}
+          SERVER: ${{ matrix.version }}
+          CLI: ${{ matrix.cli_version }}
+        run: |
+          cmp "images/image-$SLOT-amd64/selection.json" "images/image-$SLOT-arm64/selection.json"
+          jq -e --arg server "$SERVER" --arg cli "$CLI" '.version == $server and .cli_version == $cli' "images/image-$SLOT-amd64/selection.json"
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Publish tested architectures and manifest
+        env:
+          SLOT: ${{ matrix.slot }}
+          TAGS: ${{ toJSON(matrix.tags) }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/gelstable/gel
+          for arch in amd64 arm64; do
+            docker load -i "images/image-$SLOT-$arch/image.tar"
+            docker tag "$image:latest" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-$arch"
+            docker push "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-$arch"
+          done
+          sources=("$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-amd64" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-arm64")
+          while read -r tag; do
+            docker buildx imagetools create --tag "$image:$tag" "${sources[@]}"
+          done < <(jq -r '.[]' <<< "$TAGS")
+  report:
+    needs: [plan, test, publish]
+    if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v8.0.0
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const title = 'Docker image publishing failed';
+            const {owner, repo} = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', creator: 'github-actions[bot]'});
+            const issue = issues.find(i => !i.pull_request && i.title === title);
+            const failed = Object.values(JSON.parse(process.env.RESULTS)).some(j => ['failure', 'cancelled'].includes(j.result));
+            if (failed && context.eventName === 'schedule') {
+              const body = `Publishing failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+              if (issue) await github.rest.issues.update({owner, repo, issue_number: issue.number, body});
+              else await github.rest.issues.create({owner, repo, title, body});
+            } else if (!failed && issue) {
+              await github.rest.issues.update({owner, repo, issue_number: issue.number, state: 'closed'});
+            }

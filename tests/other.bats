@@ -5,7 +5,7 @@ setup() {
 }
 
 @test "run external command" {
-  run docker run --rm geldata/gel:latest sh -c 'echo "CMD $((7*3))"'
+  run docker run --rm ghcr.io/gelstable/gel:latest sh -c 'echo "CMD $((7*3))"'
   [[ ${lines[-1]} = "CMD 21" ]]
 }
 
