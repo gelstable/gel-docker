@@ -1,21 +1,14 @@
 name: Publish GHCR image
 
 on:
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
-      channel:
-        description: Native package channel
-        type: choice
-        options: [stable, testing]
-        default: stable
       slot:
-        description: Server slot (for example 7)
-        required: true
+        description: Server slot to force rebuild (optional)
         type: string
-      exact_version:
-        description: Full native version (for example 1:7.1-1)
-        required: true
-        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -25,51 +18,124 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      changed: ${{ steps.plan.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y python3-debian
+      - name: Sign in to read image labels
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Plan stable image updates
+        id: plan
+        env:
+          FORCE_SLOT: ${{ inputs.slot }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            curl -fsSL "https://registry.gelstable.com/apt/dists/stable/main/binary-$arch/Packages" -o "$arch.Packages"
+          done
+          matrix=$(python3 tests/select-package.py --all --amd64 amd64.Packages --arm64 arm64.Packages --slot "$FORCE_SLOT")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "changed=$(jq '.include | length > 0' <<< "$matrix")" >> "$GITHUB_OUTPUT"
+          jq '.include[] | {tags, labels: {"com.gelstable.server-version": .version, "com.gelstable.cli-version": .cli_version}}' <<< "$matrix"
+  dry-run:
+    needs: plan
+    if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Print planned tags and labels without publishing
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          jq '.include[] | {tags, labels: {"com.gelstable.server-version": .version, "com.gelstable.cli-version": .cli_version}}' <<< "$MATRIX"
   test:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository] -- test the workflow from this checkout
+    needs: plan
+    if: needs.plan.outputs.changed == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository] -- test workflow from this checkout
     with:
-      channel: ${{ inputs.channel }}
-      slot: ${{ inputs.slot }}
-      exact_version: ${{ inputs.exact_version }}
+      channel: stable
+      slot: ${{ matrix.slot }}
+      exact_version: ${{ matrix.version }}
+      cli_version: ${{ matrix.cli_version }}
+      artifact_prefix: image-${{ matrix.slot }}
       save_images: true
   publish:
-    needs: test
+    needs: [plan, test]
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: image-*
+          pattern: image-${{ matrix.slot }}-*
           path: images
-      - name: Verify both architectures selected the same version
-        run: cmp images/image-amd64/selection.json images/image-arm64/selection.json
+      - name: Verify selected versions
+        env:
+          SLOT: ${{ matrix.slot }}
+          SERVER: ${{ matrix.version }}
+          CLI: ${{ matrix.cli_version }}
+        run: |
+          cmp "images/image-$SLOT-amd64/selection.json" "images/image-$SLOT-arm64/selection.json"
+          jq -e --arg server "$SERVER" --arg cli "$CLI" '.version == $server and .cli_version == $cli' "images/image-$SLOT-amd64/selection.json"
       - name: Sign in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: Publish tested architectures and manifest
         env:
-          CHANNEL: ${{ inputs.channel }}
+          SLOT: ${{ matrix.slot }}
+          TAGS: ${{ toJSON(matrix.tags) }}
         run: |
           set -euo pipefail
           image=ghcr.io/gelstable/gel
-          slot=$(jq -r .slot images/image-amd64/selection.json)
-          product=$(jq -r .tag images/image-amd64/selection.json)
-          newest=$(jq -r .latest_slot images/image-amd64/selection.json)
           for arch in amd64 arm64; do
-            docker load -i "images/image-$arch/image.tar"
-            docker tag "$image:latest" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$arch"
-            docker push "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$arch"
+            docker load -i "images/image-$SLOT-$arch/image.tar"
+            docker tag "$image:latest" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-$arch"
+            docker push "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-$arch"
           done
-          sources=("$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-arm64")
-          tags=("$slot" "$product")
-          if [[ "$CHANNEL" = stable && "$slot" = "$newest" ]]; then
-            tags+=(latest)
-          fi
-          for tag in "${tags[@]}"; do
-            docker manifest create "$image:$tag" "${sources[@]}"
-            docker manifest push "$image:$tag"
-          done
+          sources=("$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-amd64" "$image:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLOT-arm64")
+          while read -r tag; do
+            docker buildx imagetools create --tag "$image:$tag" "${sources[@]}"
+          done < <(jq -r '.[]' <<< "$TAGS")
+  report:
+    needs: [plan, test, publish]
+    if: always() && github.event_name == 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9 # v7.0.1
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const title = 'Docker image publishing failed';
+            const {owner, repo} = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', creator: 'github-actions[bot]'});
+            const issue = issues.find(i => !i.pull_request && i.title === title);
+            const failed = Object.values(JSON.parse(process.env.RESULTS)).some(j => ['failure', 'cancelled'].includes(j.result));
+            if (failed) {
+              const body = `Publishing failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+              if (issue) await github.rest.issues.update({owner, repo, issue_number: issue.number, body});
+              else await github.rest.issues.create({owner, repo, title, body});
+            } else if (issue) {
+              await github.rest.issues.update({owner, repo, issue_number: issue.number, state: 'closed'});
+            }

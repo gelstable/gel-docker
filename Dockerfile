@@ -1,6 +1,7 @@
 FROM debian:bookworm-slim
 ARG version
 ARG exact_version
+ARG cli_version
 ARG subdist=stable
 ARG registry_url=https://registry.gelstable.com
 ARG key_fingerprint=EBFC46CC958983DD73D6E7D7F7C050A836EDB7EC
@@ -37,6 +38,7 @@ export DEBIAN_FRONTEND=noninteractive; \
     && s=0 && break || s=$?; done; exit $s \
 ) \
 && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8\
+&& test -n "${cli_version}" \
 && test -n "${exact_version}" \
 && [[ "${exact_version}" =~ ^1:[0-9][0-9A-Za-z.+~]*-[0-9]+$ ]] \
 && [[ "${subdist}" = stable || "${subdist}" = testing ]] \
@@ -56,7 +58,7 @@ export DEBIAN_FRONTEND=noninteractive; \
 && ( \
     server=gel-server-${version}=${exact_version}; \
     for i in $(seq 1 5); do [ $i -gt 1 ] && sleep 1; \
-        env apt-get install -y "${server}" gel-cli \
+        env apt-get install -y "${server}" "gel-cli=${cli_version}" \
     && s=0 && break || s=$?; done; exit $s \
 ) \
 && package=gel-server \
@@ -64,6 +66,8 @@ export DEBIAN_FRONTEND=noninteractive; \
 && apt-get remove -y gnupg dirmngr wget apt-transport-https \
 && apt-get purge -y --auto-remove \
 && rm -rf /var/lib/apt/lists/*
+
+LABEL com.gelstable.server-version=${exact_version} com.gelstable.cli-version=${cli_version}
 
 ENV LANG=en_US.utf8
 

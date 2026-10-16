@@ -16,7 +16,8 @@ latest_server_ver() {
   esac
   curl -fsSL "${GEL_REGISTRY_URL:-https://registry.gelstable.com}/apt/dists/${subdist}/main/binary-${architecture}/Packages" \
     | python3 "${BASH_SOURCE[0]%/*}/select-package.py" --arch "$architecture" \
-        --slot "${GEL_TEST_SLOT:-}" --exact-version "${GEL_TEST_EXACT_VERSION:-}"
+        --slot "${GEL_TEST_SLOT:-}" --exact-version "${GEL_TEST_EXACT_VERSION:-}" \
+        --cli-version "${GEL_TEST_CLI_VERSION:-}"
 }
 
 build_container() {
@@ -29,7 +30,8 @@ build_container() {
   idx_entry=$(latest_server_ver "$subdist") || return
   buildargs+=(--build-arg "version=$(jq -r .slot <<< "$idx_entry")"
               --build-arg "exact_version=$(jq -r .version <<< "$idx_entry")"
-              --build-arg "subdist=$subdist")
+              --build-arg "subdist=$subdist"
+              --build-arg "cli_version=${GEL_TEST_CLI_VERSION:-$(jq -r .cli_version <<< "$idx_entry")}")
   if [[ -n "${GEL_REGISTRY_URL:-}" ]]; then
     buildargs+=(--build-arg "registry_url=$GEL_REGISTRY_URL")
   fi

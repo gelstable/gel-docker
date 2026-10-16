@@ -29,23 +29,24 @@ Try the [quickstart](https://docs.geldata.com/learn/quickstart/overview) or jump
 
 Pull `ghcr.io/gelstable/gel:7` for a server slot or
 `ghcr.io/gelstable/gel:7.1` for an exact product version. `latest` follows the
-newest stable slot. Testing builds are selected explicitly during publication;
-the exact product tag renders prerelease `~` as `-` (for example `7.2-rc.1`).
-Slot tags follow the most recently published build for that slot.
+newest stable slot. Images update automatically after a stable server or CLI
+release; the hourly publisher rebuilds slots whose pinned versions changed.
+Only stable images are published. Slot tags follow the newest package for that slot.
 
 ## Build from native packages
 
 ```sh
 docker build -t ghcr.io/gelstable/gel:local \
   --build-arg version=7 \
-  --build-arg exact_version=1:7.1-1 .
+  --build-arg exact_version=1:7.1-1 \
+  --build-arg cli_version=1:7.2-1 .
 ```
 
 `version` is the required server slot; `exact_version` is the required full
 Debian version including epoch and revision, without wildcards. `subdist` selects
 `stable` (default) or `testing`. The build fails if the exact version is absent.
-The image installs `gel-cli` and retains the same authenticated APT source for
-runtime `GEL_DOCKER_EXTENSIONS` installations.
+`cli_version` is the required full native CLI version. The image pins `gel-cli`
+and retains the same authenticated APT source for runtime `GEL_DOCKER_EXTENSIONS` installations.
 
 `registry_url` defaults to `https://registry.gelstable.com`. `key_fingerprint`
 pins the primary OpenPGP fingerprint of `/keys/gelstable.asc`; the downloaded
@@ -66,7 +67,15 @@ checks may set `GEL_REGISTRY_URL` and `GEL_KEY_FINGERPRINT`.
 
 CI tests both amd64 and arm64 with the packaged CLI, including runtime PostGIS
 installation, schema migration, geometry queries, and an unchanged server
-package version. The manual **Publish GHCR image** workflow runs only on the
-default branch. It accepts a channel, slot, and full native version, tests both
-architectures, then uses `GITHUB_TOKEN` to publish the tested images and a
-multiarch manifest. It publishes `latest` only for the newest stable slot.
+package version. The **Publish GHCR image** workflow runs hourly and can be
+started manually. To force a rebuild, open the workflow's **Run workflow** form
+and enter a server `slot` (for example `7`); leave it empty to reconcile all
+slots normally. It compares the stable amd64 and arm64 indexes with image
+labels, tests both architectures, and publishes the tested multiarch images.
+A new CLI package rebuilds every slot. `latest` follows the newest stable slot.
+Branch runs only print planned tags and version labels without building or
+publishing. An empty registry succeeds without building. Scheduled failures
+open or update one issue, which closes after the next successful scheduled run.
+
+Run the fixture planner checks without Docker using
+`python3 -m unittest discover -s tests -p 'test_*.py'` (requires `python3-debian`).
