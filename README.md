@@ -75,7 +75,7 @@ labels, tests both architectures, and publishes the tested multiarch images.
 A new CLI package rebuilds every slot. `latest` follows the newest stable slot.
 Branch runs only print planned tags and version labels without building or
 publishing. An empty registry succeeds without building. Scheduled failures
-open or update one issue, which closes after the next successful scheduled run.
+open or update one issue, which closes after the next successful run on the default branch.
 
 Run the fixture planner checks without Docker using
 `python3 -m unittest discover -s tests -p 'test_*.py'` (requires `python3-debian`).

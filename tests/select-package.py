@@ -67,7 +67,7 @@ if args.all:
             else:
                 image = json.loads(result.stdout)
                 # Multi-platform .Image is keyed by platform; require every image to match.
-                images = [image] if "config" in image else list(image.values())
+                images = [image.get(platform, {}) for platform in ("linux/amd64", "linux/arm64")]
                 wanted = {"com.gelstable.server-version": server, "com.gelstable.cli-version": cli}
                 current = wanted if images and all(all(item.get("config", {}).get("Labels", {}).get(k) == v for k, v in wanted.items()) for item in images) else {}
         if slot == args.slot or current.get("com.gelstable.server-version") != server or current.get("com.gelstable.cli-version") != cli:
