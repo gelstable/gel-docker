@@ -62,7 +62,13 @@ if args.all:
             ], capture_output=True, text=True)
             if result.returncode:
                 if not any(marker in result.stderr.lower() for marker in ("manifest unknown", "not found")):
-                    sys.exit(result.stderr)
+                    # GHCR denies token requests before the first package exists.
+                    # Confirm absence through the authenticated API; never hide auth errors.
+                    package = subprocess.run([
+                        "gh", "api", "orgs/gelstable/packages/container/gel", "--silent",
+                    ], capture_output=True, text=True)
+                    if not package.returncode or "(HTTP 404)" not in package.stderr:
+                        sys.exit(result.stderr + package.stderr)
                 current = {}
             else:
                 image = json.loads(result.stdout)

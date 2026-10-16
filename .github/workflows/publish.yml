@@ -39,6 +39,7 @@ jobs:
         id: plan
         env:
           FORCE_SLOT: ${{ inputs.slot }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do

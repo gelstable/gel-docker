@@ -1,5 +1,6 @@
 """Fixture tests for stable package and image reconciliation."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,7 +11,7 @@ SELECT = Path(__file__).with_name('select-package.py')
 
 
 class PublishPlan(unittest.TestCase):
-    def plan(self, labels=None, force='', mismatch=False, empty=False):
+    def plan(self, labels=None, force='', mismatch=False, empty=False, inspect_error=None, api_error=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for arch in ('amd64', 'arm64'):
@@ -20,7 +21,20 @@ class PublishPlan(unittest.TestCase):
                     entries[-1] = ('gel-cli', '1:7.1-1')
                 (root / arch).write_text(''.join(f'Package: {name}\nVersion: {version}\nArchitecture: {arch}\n\n' for name, version in entries) if not empty else '')
             (root / 'labels').write_text(json.dumps(labels or {}))
-            result = subprocess.run([sys.executable, str(SELECT), '--all', '--amd64', str(root / 'amd64'), '--arm64', str(root / 'arm64'), '--labels', str(root / 'labels'), '--slot', force], capture_output=True, text=True)
+            env = os.environ.copy()
+            label_args = ['--labels', str(root / 'labels')]
+            if inspect_error is not None:
+                label_args = []
+                for name, error in [('docker', inspect_error), ('gh', api_error)]:
+                    executable = root / name
+                    executable.write_text(f'#!{sys.executable}\nimport sys\nsys.stderr.write({error!r})\nsys.exit(1)\n')
+                    executable.chmod(0o755)
+                env['PATH'] = str(root) + os.pathsep + env['PATH']
+            result = subprocess.run([sys.executable, str(SELECT), '--all', '--amd64', str(root / 'amd64'), '--arm64', str(root / 'arm64'), '--slot', force] + label_args, capture_output=True, text=True, env=env)
+            if api_error and '(HTTP 404)' not in api_error:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(api_error, result.stderr)
+                return
             if mismatch:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('disagree', result.stderr)
@@ -52,6 +66,11 @@ class PublishPlan(unittest.TestCase):
 
     def test_arch_mismatch(self):
         self.plan(mismatch=True)
+
+    def test_ghcr_first_publication(self):
+        error = 'ERROR: failed to authorize: token 403 Forbidden'
+        self.assertEqual([p['slot'] for p in self.plan(inspect_error=error, api_error='gh: Package not found. (HTTP 404)')], ['6', '7'])
+        self.plan(inspect_error=error, api_error='gh: Bad credentials (HTTP 401)')
 
     def test_empty_registry(self):
         self.assertEqual(self.plan(empty=True), [])
